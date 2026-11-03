@@ -1,153 +1,187 @@
 # dpgen
 
-Config-driven Minecraft datapack generator for the CLI. Point it at a
-YAML or JSON file describing your namespaces, functions, advancements,
-recipes, loot tables, predicates, and item modifiers, and it builds a
-ready-to-use datapack `.zip`.
+A configuration-driven command-line generator for Minecraft datapacks. It reads
+YAML or JSON, validates the input, builds an in-memory file map and writes a
+ZIP containing `pack.mcmeta`, functions, tags and supported JSON resources. It
+does not install the pack, run Minecraft or verify that the generated content
+loads in a particular game version.
 
-Targets modern Minecraft (26.x, `min_format`/`max_format` pack.mcmeta).
+> **Safety:** use trusted configuration and an output path in a disposable
+> directory. `build` opens its output with `fs.createWriteStream`, which can
+> truncate an existing file. The default output name comes from `pack.name`;
+> specify `-o` explicitly. Resource paths permit dots and slashes, and the
+> schema does not independently reject `..` path segments. Inspect ZIP entries
+> before extracting and use extraction tooling that prevents path traversal.
+> Generated commands are not sandboxed when Minecraft later executes them.
 
-## Why
+## Requirements and setup
 
-Browser-based datapack generators are fine for a single namespace and
-a couple of functions, but they don't validate anything, don't scale
-past "one tick function, one load function," and produce a config you
-can't check into version control. `dpgen` is built to be scripted,
-diffed, and reused.
+- Node.js and npm. No Node version or engine range is enforced in
+  [`package.json`](package.json); a particular Node release has not been
+  certified here.
+- Dependencies declared by the project: `ajv`, `archiver` and `js-yaml`.
+  [`package-lock.json`](package-lock.json) records a dependency resolution.
+- A trusted YAML or JSON configuration. The CLI treats a filename ending in
+  `.json` as JSON; other filenames are parsed as YAML.
 
-- **Config validation before build** — invalid namespace names,
-  duplicate function paths, dangling predicate references, and
-  inconsistent `min_format`/`max_format` ranges fail loudly at
-  `validate`/`build` time instead of producing a broken pack.
-- **Multiple namespaces, multiple tick/load functions** — no
-  single-function ceiling; every `tick`/`load` function you declare
-  gets merged into the right tag file.
-- **Macro function support** — generates the `$(param)` skeleton for
-  parameterized functions callable via `function ns:path with storage
-  ...`.
-- **Structured content generation** — advancements, shaped/shapeless
-  recipes, chest/block/entity loot tables, predicates
-  (`random_chance`, `entity_properties`, `match_tool`), and item
-  modifiers (`set_count`, `enchant_randomly`, `set_name`), including
-  gating a modifier behind a predicate via `predicate_ref`.
-- **Plain files, plain diffs** — your datapack definition lives in one
-  YAML file you can review in a pull request.
+From a local checkout, review the dependency tree and install it according to
+your environment's policy, for example:
 
-## Install
-
-```bash
-git clone https://github.com/<your-org>/dpgen.git
-cd dpgen
-npm install
+```sh
+npm ci --ignore-scripts
 ```
 
-Requires Node.js (no specific minimum enforced, developed against
-current LTS).
+The repository does not declare an npm `bin` entry; invoke the checked-in
+entry point with Node:
 
-## Usage
-
-```bash
-# Check a config without building anything
+```sh
+# Parses the configuration and constructs the in-memory file map; no ZIP.
 node bin/dpgen.js validate examples/example.yaml
 
-# Build a datapack zip
-node bin/dpgen.js build examples/example.yaml -o mypack.zip
+# A fresh temporary directory avoids overwriting an existing ZIP.
+work_dir="$(mktemp -d)"
+node bin/dpgen.js build examples/example.yaml -o "$work_dir/example.zip"
 ```
 
-## Config format
+`validate` and `build` both call `buildFileMap`. Invalid input causes a
+nonzero exit; errors from individual template builders may appear as a stack
+trace. `build` defaults to `<pack.name>.zip` (or `datapack.zip` when no name is
+available before validation). The code resolves the chosen path relative to
+the current working directory. Only `-o <path>` is parsed as an output option.
+
+## Configuration
+
+The root requires `pack` and a non-empty `namespaces` array. Unknown keys are
+rejected at the explicitly defined object levels. This is a compact example;
+[`examples/example.yaml`](examples/example.yaml) and
+[`examples/example-v2.yaml`](examples/example-v2.yaml) provide fuller examples.
 
 ```yaml
 pack:
-  name: "test-pack"
-  description: "description"
-  min_format: 107            # optional, defaults to 107
-  max_format: 107             # optional, defaults to 107
-  dependencies:                 # optional, see "Dependencies" below
-    - id: someothernamespace
+  name: test-pack
+  description: Example generated pack
+  min_format: 107
+  max_format: 107
+  dependencies:                  # optional dpgen convention, not vanilla enforcement
+    - id: another_namespace
       version: "1.0.0"
       required: true
 
 namespaces:
-  - id: testns
+  - id: example
     functions:
-      - path: main
-        tick: true            # added to data/minecraft/tags/function/tick.json
-        commands:
-          - "say tick running"
       - path: init
-        load: true             # added to load.json
+        load: true
+        commands: ["say loaded"]
+      - path: tick
+        tick: true
+        commands: ["say tick"]
       - path: greet
-        macro: true             # generates a $(param) skeleton
+        macro: true
     advancements:
       - path: root
-        title: "Test Root"
-        icon: "minecraft:stick"
-        reward_function: "testns:init"
+        title: Example
+        icon: minecraft:stick
+        reward_function: example:init
     recipes:
-      - path: test_item
-        type: shapeless          # or shaped (requires pattern + key)
-        result: "minecraft:emerald"
-        ingredients: ["minecraft:diamond"]
+      - path: gem
+        type: shapeless
+        result: minecraft:emerald
+        ingredients: [minecraft:diamond]
     loot_tables:
-      - path: test_chest
-        kind: chest               # block | chest | entity
-        item: "minecraft:gold_ingot"
+      - path: chest
+        kind: chest
+        item: minecraft:gold_ingot
         count: 3
     predicates:
       - path: half_chance
-        kind: random_chance        # random_chance | entity_properties | match_tool
+        kind: random_chance
         chance: 0.5
     item_modifiers:
       - path: bonus_count
-        kind: set_count             # set_count | enchant_randomly | set_name
+        kind: set_count
         count_min: 1
         count_max: 3
-        predicate_ref: "testns:half_chance"   # optional condition gate
+        predicate_ref: example:half_chance
 ```
 
-See [`examples/example.yaml`](examples/example.yaml) for a minimal
-config and [`examples/example-v2.yaml`](examples/example-v2.yaml) for
-one covering predicates, item modifiers, and dependencies together.
+### Fields and generated resources
 
-## Pack format
+- Namespace IDs match lowercase letters, digits, `_`, `.`, and `-`; resource
+  paths additionally permit `/`. Item IDs use a `namespace:path` shape.
+- `pack.min_format` and `pack.max_format` accept an integer or a two-number
+  `[major, minor]` array; each defaults to `107`. Ordering checks compare the
+  **major component only**, so a reversed minor range with equal majors is not
+  caught. Legacy `pack_format` and `supported_formats` are not accepted by
+  this input schema. Confirm format values and generated syntax against the
+  Minecraft release you intend to use; a configured number is not proof of
+  compatibility.
+- Each function becomes `data/<namespace>/function/<path>.mcfunction`.
+  `tick: true` and `load: true` add it to the corresponding
+  `data/minecraft/tags/function/` tag. When `macro: true`, the generator emits
+  a fixed `$(example)` skeleton rather than the supplied `commands` list.
+- Advancements, shaped/shapeless recipes, block/chest/entity loot tables,
+  predicates and item modifiers become files in their respective singular
+  resource directories. Some template-specific required fields are checked
+  after schema validation; see [`templates.js`](templates.js) for defaults and
+  exact generated structures.
+- Supported predicate kinds are `random_chance`, `entity_properties` and
+  `match_tool`; supported modifier kinds are `set_count`, `enchant_randomly`
+  and `set_name`. A modifier's `predicate_ref`, when provided, must match a
+  predicate defined in the same configuration, including its namespace.
+- The builder rejects duplicate namespace IDs and duplicate **function** paths
+  within a namespace. It does not perform an equivalent duplicate check for
+  every other resource type: repeated generated keys can overwrite earlier
+  entries in the in-memory map. The generated dependency function can also
+  collide with a user-specified `__dpgen_deps` function.
 
-Since Minecraft snapshot 25w31a, `pack.mcmeta` declares a range via
-`min_format` + `max_format` instead of the older `pack_format` +
-`supported_formats` pair. Each field accepts either a plain integer
-or a `[major, minor]` pair. This tool's schema rejects the legacy
-fields outright rather than silently misinterpreting them — a config
-still using `pack_format`/`supported_formats` fails validation with a
-clear error.
+The validation is structural and partial. It does not query Minecraft's
+registry, prove that item IDs exist, check the safety or correctness of
+commands, or exercise a pack in game.
 
-Packs targeting versions before format 82 (pre-25w31a) are outside
-this tool's scope, since that requires the legacy field to also be
-present.
+## Dependency convention
 
-## Dependencies
+`pack.dependencies` is consumed by dpgen, not written as a vanilla datapack
+dependency declaration. When it is non-empty, the generator creates
+`__dpgen_deps.mcfunction` in the first namespace and prepends it to the load
+tag. The function creates the `dpgen_loaded` scoreboard objective, marks that
+first namespace as loaded, and checks the named dependency scores.
 
-Vanilla Minecraft has no real datapack dependency system —
-`pack.mcmeta`'s `dependencies` field only affects resource pack
-merging, and the datapack loader ignores it. When you declare
-`pack.dependencies`, `dpgen` generates a scoreboard-based check
-(`__dpgen_deps.mcfunction`, wired into `load`) that warns in chat if
-a dependency's own pack hasn't marked itself as loaded under the same
-`dpgen_loaded` convention.
+Other packs must independently set the same scoreboard convention; unrelated
+packs are not detected. The optional `version` is displayed in a warning but
+is **not compared**. A missing `required: true` dependency produces an
+additional message saying the pack is disabled, but the generated function
+contains no actual disable operation. Treat both required and optional entries
+as warnings, not dependency enforcement. Dependency IDs are inserted into
+commands, so review them and use only trusted input.
 
-This only detects other packs that participate in the same
-convention — either built with `dpgen` themselves, or manually
-setting `scoreboard players set <id> dpgen_loaded 1` in their own
-load function. It cannot detect an unrelated datapack's presence;
-treat it as a soft same-ecosystem check, not real dependency
-resolution.
+## Layout and maintenance
 
-## Limits
+| Path | Purpose |
+| --- | --- |
+| [`bin/dpgen.js`](bin/dpgen.js) | CLI argument parsing, config loading and ZIP output. |
+| [`schema.js`](schema.js) | AJV schema, defaults and name patterns. |
+| [`builder.js`](builder.js) | Cross-field checks, generated file map and tag assembly. |
+| [`templates.js`](templates.js) | JSON and function templates, including dependency warnings. |
+| [`examples/`](examples/) | Sample YAML inputs. |
 
-- No resource pack (`assets/`) generation.
-- No validation beyond JSON/config shape — a typo'd item ID or
-  enchantment ID won't be caught, only structurally invalid config.
-- No legacy `pack_format` support (see "Pack format" above).
+The `npm test` script is a placeholder that deliberately exits with an error;
+there is no tracked automated test suite in this snapshot. In one isolated
+check using Node 20.20.2 and npm 10.8.2, the dependency install completed with
+`npm ci --ignore-scripts --no-audit --no-fund`. Both checked-in example
+configurations passed `validate`, and building the first example produced a
+nine-file ZIP with a valid CRC. The install warned
+that transitive `inflight@1.0.6` and `glob@8.1.0` are deprecated; no dependency
+security audit or remediation was performed. This check did not run Minecraft
+or validate the generated pack in game.
+
+Review and test outputs in a disposable world appropriate to the targeted
+Minecraft version before using them elsewhere. No resource-pack generation is
+implemented.
 
 ## License
 
-_Add a license before publishing — none is currently declared in
-`package.json`._
+The repository contains an [MIT license](LICENSE) attributed to Runtoolkit,
+while `package.json` declares `ISC`. These declarations differ; maintainers
+should resolve that metadata discrepancy rather than assuming they are the
+same license.
